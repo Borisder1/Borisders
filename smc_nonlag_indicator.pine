@@ -1,0 +1,250 @@
+//@version=6
+strategy("Borisders Neo SMC v1", overlay=true, calc_on_every_tick=true, pyramiding=0, process_orders_on_close=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
+
+// =============================
+// Localization
+// =============================
+lang = input.string("UKR", "Language", options=["UKR", "ENG", "POL"])
+loc(ukr, eng, pol) => lang == "UKR" ? ukr : lang == "ENG" ? eng : pol
+
+// =============================
+// Inputs
+// =============================
+lookbackStruct = input.int(20, "Structure Lookback", minval=5, maxval=200)
+impulseAtrMult = input.float(1.2, "Impulse ATR Multiplier", minval=0.5, step=0.1)
+atrLen = input.int(14, "ATR Length")
+atrFilterMin = input.float(0.002, "Min ATR/Close Filter", step=0.0001)
+volLen = input.int(20, "Volume SMA")
+volSpikeMult = input.float(1.25, "Volume Spike Mult", minval=1.0, step=0.05)
+htfTf = input.timeframe("240", "HTF Trend TF")
+htfSmaLen = input.int(50, "HTF SMA Length")
+slAtrMult = input.float(1.7, "SL ATR Mult", minval=0.8, step=0.1)
+rr1 = input.float(1.2, "TP1 RR", minval=0.5, step=0.1)
+rr2 = input.float(2.5, "TP2 RR", minval=1.0, step=0.1)
+showTradePlan = input.bool(true, "Show Trade Plan")
+showForecast = input.bool(true, "Show Forecast Path")
+allowStrategyOrders = input.bool(true, "Enable Strategy Orders")
+cooldownBars = input.int(15, "Cooldown Bars", minval=0)
+retestWindowBars = input.int(12, "Retest Window Bars", minval=1, maxval=80)
+
+// =============================
+// Core series
+// =============================
+atr = ta.atr(atrLen)
+volSma = ta.sma(volume, volLen)
+volSpike = volume > volSma * volSpikeMult
+volatilityOk = atr / close > atrFilterMin
+
+htfClose = request.security(syminfo.tickerid, htfTf, close)
+htfSma = request.security(syminfo.tickerid, htfTf, ta.sma(close, htfSmaLen))
+trendBull = htfClose > htfSma
+trendBear = htfClose < htfSma
+
+prevHigh = ta.highest(high[1], lookbackStruct)
+prevLow = ta.lowest(low[1], lookbackStruct)
+
+bullBreak = close > prevHigh
+bearBreak = close < prevLow
+
+// Liquidity sweep logic: wick through level + close back inside range
+liqSweepHigh = high > prevHigh and close < prevHigh
+liqSweepLow = low < prevLow and close > prevLow
+
+impulseUp = (close - open) > atr * impulseAtrMult
+impulseDown = (open - close) > atr * impulseAtrMult
+
+// FVG (3-candle imbalance approximation)
+bullFvg = low > high[2]
+bearFvg = high < low[2]
+
+// Order block candidate: last opposite candle before impulse+break
+bullObTop = math.max(open[1], close[1])
+bullObBot = math.min(open[1], close[1])
+bearObTop = math.max(open[1], close[1])
+bearObBot = math.min(open[1], close[1])
+
+validBullOb = close[1] < open[1] and impulseUp and bullBreak and bullFvg
+validBearOb = close[1] > open[1] and impulseDown and bearBreak and bearFvg
+
+var box bullObBox = na
+var box bearObBox = na
+var box bullFvgBox = na
+var box bearFvgBox = na
+
+if validBullOb
+    if not na(bullObBox)
+        box.delete(bullObBox)
+    bullObBox := box.new(left=bar_index-1, top=bullObTop, right=bar_index+20, bottom=bullObBot, bgcolor=color.new(color.lime, 86), border_color=color.new(color.lime, 0))
+
+if validBearOb
+    if not na(bearObBox)
+        box.delete(bearObBox)
+    bearObBox := box.new(left=bar_index-1, top=bearObTop, right=bar_index+20, bottom=bearObBot, bgcolor=color.new(color.red, 86), border_color=color.new(color.red, 0))
+
+if bullFvg
+    if not na(bullFvgBox)
+        box.delete(bullFvgBox)
+    bullFvgBox := box.new(left=bar_index-2, top=low, right=bar_index+20, bottom=high[2], bgcolor=color.new(color.aqua, 88), border_color=color.new(color.aqua, 30))
+
+if bearFvg
+    if not na(bearFvgBox)
+        box.delete(bearFvgBox)
+    bearFvgBox := box.new(left=bar_index-2, top=low[2], right=bar_index+20, bottom=high, bgcolor=color.new(color.fuchsia, 88), border_color=color.new(color.fuchsia, 30))
+
+inBullOb = not na(bullObBox) and close <= box.get_top(bullObBox) and close >= box.get_bottom(bullObBox)
+inBearOb = not na(bearObBox) and close <= box.get_top(bearObBox) and close >= box.get_bottom(bearObBox)
+
+inBullFvg = bullFvg or (not na(bullFvgBox) and close <= box.get_top(bullFvgBox) and close >= box.get_bottom(bullFvgBox))
+inBearFvg = bearFvg or (not na(bearFvgBox) and close <= box.get_top(bearFvgBox) and close >= box.get_bottom(bearFvgBox))
+
+// Sequence: Sweep -> Impulse -> Break -> Return to zone
+var int lastSweepBull = na
+var int lastSweepBear = na
+if liqSweepLow
+    lastSweepBull := bar_index
+if liqSweepHigh
+    lastSweepBear := bar_index
+
+recentBullSweep = not na(lastSweepBull) and bar_index - lastSweepBull <= 25
+recentBearSweep = not na(lastSweepBear) and bar_index - lastSweepBear <= 25
+
+bullSetupTrigger = recentBullSweep and bullBreak and volatilityOk and volSpike and trendBull
+bearSetupTrigger = recentBearSweep and bearBreak and volatilityOk and volSpike and trendBear
+
+var int bullSetupBar = na
+var int bearSetupBar = na
+if bullSetupTrigger
+    bullSetupBar := bar_index
+if bearSetupTrigger
+    bearSetupBar := bar_index
+
+bullSetupActive = not na(bullSetupBar) and bar_index - bullSetupBar <= retestWindowBars
+bearSetupActive = not na(bearSetupBar) and bar_index - bearSetupBar <= retestWindowBars
+
+longSignal = bullSetupActive and (inBullOb or inBullFvg)
+shortSignal = bearSetupActive and (inBearOb or inBearFvg)
+
+var int lastTradeBar = na
+cooldownOk = na(lastTradeBar) or bar_index - lastTradeBar > cooldownBars
+
+enterLong = longSignal and cooldownOk and strategy.position_size == 0
+enterShort = shortSignal and cooldownOk and strategy.position_size == 0
+
+if enterLong
+    bullSetupBar := na
+if enterShort
+    bearSetupBar := na
+
+riskLong = atr * slAtrMult
+riskShort = atr * slAtrMult
+
+longSL = close - riskLong
+longTP1 = close + riskLong * rr1
+longTP2 = close + riskLong * rr2
+
+shortSL = close + riskShort
+shortTP1 = close - riskShort * rr1
+shortTP2 = close - riskShort * rr2
+
+if allowStrategyOrders and enterLong
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("L-TP1", "LONG", stop=longSL, limit=longTP1, qty_percent=50)
+    strategy.exit("L-TP2", "LONG", stop=longSL, limit=longTP2, qty_percent=50)
+    lastTradeBar := bar_index
+
+if allowStrategyOrders and enterShort
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("S-TP1", "SHORT", stop=shortSL, limit=shortTP1, qty_percent=50)
+    strategy.exit("S-TP2", "SHORT", stop=shortSL, limit=shortTP2, qty_percent=50)
+    lastTradeBar := bar_index
+
+// Breakeven after TP1 hit approximation
+if strategy.position_size > 0 and high >= strategy.position_avg_price + riskLong * rr1
+    strategy.exit("L-BE", "LONG", stop=strategy.position_avg_price)
+if strategy.position_size < 0 and low <= strategy.position_avg_price - riskShort * rr1
+    strategy.exit("S-BE", "SHORT", stop=strategy.position_avg_price)
+
+// Visual trade plan
+var line entryLine = na
+var line slLine = na
+var line tp1Line = na
+var line tp2Line = na
+
+clearPlan() =>
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tp1Line)
+        line.delete(tp1Line)
+    if not na(tp2Line)
+        line.delete(tp2Line)
+
+if showTradePlan and (enterLong or enterShort)
+    clearPlan()
+    e = close
+    s = enterLong ? longSL : shortSL
+    t1 = enterLong ? longTP1 : shortTP1
+    t2 = enterLong ? longTP2 : shortTP2
+    entryLine := line.new(bar_index, e, bar_index+20, e, color=color.white, width=2)
+    slLine := line.new(bar_index, s, bar_index+20, s, color=color.red, width=2)
+    tp1Line := line.new(bar_index, t1, bar_index+20, t1, color=color.new(color.green, 0), style=line.style_dashed)
+    tp2Line := line.new(bar_index, t2, bar_index+20, t2, color=color.new(color.green, 20), style=line.style_dashed)
+
+// Forecast path (3 variants)
+var line fc1 = na
+var line fc2 = na
+var line fc3 = na
+
+clearFc() =>
+    if not na(fc1)
+        line.delete(fc1)
+    if not na(fc2)
+        line.delete(fc2)
+    if not na(fc3)
+        line.delete(fc3)
+
+if showForecast and (enterLong or enterShort)
+    clearFc()
+    step = atr * 0.6
+    dir = enterLong ? 1.0 : -1.0
+    fc1 := line.new(bar_index, close, bar_index+8, close + dir * step * 4, style=line.style_dotted, color=color.new(color.teal, 0), width=2)
+    fc2 := line.new(bar_index+8, close + dir * step * 4, bar_index+16, close + dir * step * 8, style=line.style_dotted, color=color.new(color.teal, 0), width=2)
+    fc3 := line.new(bar_index, close, bar_index+16, close - dir * step * 3, style=line.style_dotted, color=color.new(color.orange, 0), width=2)
+
+noActiveSetup = not enterLong and not enterShort
+if strategy.position_size == 0 and noActiveSetup
+    clearPlan()
+    clearFc()
+
+plotshape(liqSweepLow, title="Sweep Low", style=shape.triangleup, color=color.new(color.lime, 0), size=size.tiny, location=location.belowbar, text="SW")
+plotshape(liqSweepHigh, title="Sweep High", style=shape.triangledown, color=color.new(color.red, 0), size=size.tiny, location=location.abovebar, text="SW")
+plotshape(enterLong, title="Long", style=shape.labelup, color=color.new(color.green, 0), text="LONG", location=location.belowbar)
+plotshape(enterShort, title="Short", style=shape.labeldown, color=color.new(color.red, 0), text="SHORT", location=location.abovebar)
+
+// Dashboard
+var table dash = table.new(position.bottom_right, 2, 9, border_width=1)
+statusText = strategy.position_size == 0 ? (cooldownOk ? loc("Готовий", "Ready", "Gotowy") : loc("Кулдаун", "Cooldown", "Chlodzenie")) : loc("Активна", "Active", "Aktywna")
+directionText = enterLong ? loc("Консолідація -> Вгору", "Range -> Up", "Konsolidacja -> Gora") : enterShort ? loc("Консолідація -> Вниз", "Range -> Down", "Konsolidacja -> Dol") : bullSetupActive ? loc("Long сетап: ретест", "Long setup: retest", "Long setup: retest") : bearSetupActive ? loc("Short сетап: ретест", "Short setup: retest", "Short setup: retest") : loc("Очікування", "Waiting", "Oczekiwanie")
+openPnl = strategy.openprofit
+riskPct = (atr * slAtrMult / close) * 100
+
+if barstate.islast
+    table.cell(dash, 0, 0, loc("Статус", "Status", "Status"), text_color=color.white, bgcolor=color.new(color.black, 0))
+    table.cell(dash, 1, 0, statusText)
+    table.cell(dash, 0, 1, loc("Тренд HTF", "HTF Trend", "Trend HTF"))
+    table.cell(dash, 1, 1, trendBull ? loc("Бичачий", "Bullish", "Byczy") : trendBear ? loc("Ведмежий", "Bearish", "Niedzwiedzi") : loc("Флет", "Flat", "Flat"))
+    table.cell(dash, 0, 2, loc("PnL", "PnL", "PnL"))
+    table.cell(dash, 1, 2, str.tostring(openPnl, format.mintick))
+    table.cell(dash, 0, 3, loc("Ризик %", "Risk %", "Ryzyko %"))
+    table.cell(dash, 1, 3, str.tostring(riskPct, "#.##"))
+    table.cell(dash, 0, 4, loc("Прогноз", "Forecast", "Prognoza"))
+    table.cell(dash, 1, 4, directionText)
+    table.cell(dash, 0, 5, loc("ATR фільтр", "ATR Filter", "Filtr ATR"))
+    table.cell(dash, 1, 5, volatilityOk ? loc("ОК", "OK", "OK") : loc("Низька волат.", "Low vol.", "Niska zm."))
+    table.cell(dash, 0, 6, loc("Обсяг", "Volume", "Wolumen"))
+    table.cell(dash, 1, 6, volSpike ? loc("Сплеск", "Spike", "Skok") : loc("Норма", "Normal", "Normalny"))
+    table.cell(dash, 0, 7, loc("Winrate (день)", "Winrate (day)", "Winrate (dzien)"))
+    table.cell(dash, 1, 7, "~" + str.tostring(strategy.wintrades / math.max(strategy.closedtrades, 1) * 100, "#.0") + "%")
+    table.cell(dash, 0, 8, loc("Сетап", "Setup", "Setup"))
+    table.cell(dash, 1, 8, bullSetupActive ? "LONG" : bearSetupActive ? "SHORT" : "-")
