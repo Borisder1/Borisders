@@ -15,7 +15,7 @@ impulseAtrMult = input.float(1.2, "Impulse ATR Multiplier", minval=0.5, step=0.1
 atrLen = input.int(14, "ATR Length")
 atrFilterMin = input.float(0.002, "Min ATR/Close Filter", step=0.0001)
 volLen = input.int(20, "Volume SMA")
-volSpikeMult = input.float(1.25, "Volume Spike Mult", minval=1.0, step=0.05)
+volSpikeMult = input.float(1.05, "Volume Spike Mult", minval=0.8, step=0.05)
 htfTf = input.timeframe("240", "HTF Trend TF")
 htfSmaLen = input.int(50, "HTF SMA Length")
 slAtrMult = input.float(1.7, "SL ATR Mult", minval=0.8, step=0.1)
@@ -24,21 +24,28 @@ rr2 = input.float(2.5, "TP2 RR", minval=1.0, step=0.1)
 showTradePlan = input.bool(true, "Show Trade Plan")
 showForecast = input.bool(true, "Show Forecast Path")
 allowStrategyOrders = input.bool(true, "Enable Strategy Orders")
-cooldownBars = input.int(15, "Cooldown Bars", minval=0)
-retestWindowBars = input.int(12, "Retest Window Bars", minval=1, maxval=80)
+cooldownBars = input.int(8, "Cooldown Bars", minval=0)
+retestWindowBars = input.int(20, "Retest Window Bars", minval=1, maxval=80)
+useTrendFilter = input.bool(false, "Use HTF Trend Filter")
+useVolatilityFilter = input.bool(false, "Use ATR Volatility Filter")
+useVolumeFilter = input.bool(false, "Use Volume Spike Filter")
 
 // =============================
 // Core series
 // =============================
 atr = ta.atr(atrLen)
 volSma = ta.sma(volume, volLen)
-volSpike = volume > volSma * volSpikeMult
-volatilityOk = atr / close > atrFilterMin
+rawVolSpike = volume > volSma * volSpikeMult
+volSpike = useVolumeFilter ? rawVolSpike : true
+rawVolatilityOk = atr / close > atrFilterMin
+volatilityOk = useVolatilityFilter ? rawVolatilityOk : true
 
 htfClose = request.security(syminfo.tickerid, htfTf, close)
 htfSma = request.security(syminfo.tickerid, htfTf, ta.sma(close, htfSmaLen))
-trendBull = htfClose > htfSma
-trendBear = htfClose < htfSma
+rawTrendBull = htfClose > htfSma
+rawTrendBear = htfClose < htfSma
+trendBull = useTrendFilter ? rawTrendBull : true
+trendBear = useTrendFilter ? rawTrendBear : true
 
 prevHigh = ta.highest(high[1], lookbackStruct)
 prevLow = ta.lowest(low[1], lookbackStruct)
@@ -121,8 +128,10 @@ if bearSetupTrigger
 bullSetupActive = not na(bullSetupBar) and bar_index - bullSetupBar <= retestWindowBars
 bearSetupActive = not na(bearSetupBar) and bar_index - bearSetupBar <= retestWindowBars
 
-longSignal = bullSetupActive and (inBullOb or inBullFvg)
-shortSignal = bearSetupActive and (inBearOb or inBearFvg)
+zoneBullOk = inBullOb or inBullFvg
+zoneBearOk = inBearOb or inBearFvg
+longSignal = bullSetupActive and (zoneBullOk or close > open)
+shortSignal = bearSetupActive and (zoneBearOk or close < open)
 
 var int lastTradeBar = na
 cooldownOk = na(lastTradeBar) or bar_index - lastTradeBar > cooldownBars
@@ -223,7 +232,7 @@ plotshape(enterLong, title="Long", style=shape.labelup, color=color.new(color.gr
 plotshape(enterShort, title="Short", style=shape.labeldown, color=color.new(color.red, 0), text="SHORT", location=location.abovebar)
 
 // Dashboard
-var table dash = table.new(position.bottom_right, 2, 9, border_width=1)
+var table dash = table.new(position.bottom_right, 2, 10, border_width=1)
 statusText = strategy.position_size == 0 ? (cooldownOk ? loc("Готовий", "Ready", "Gotowy") : loc("Кулдаун", "Cooldown", "Chlodzenie")) : loc("Активна", "Active", "Aktywna")
 directionText = enterLong ? loc("Консолідація -> Вгору", "Range -> Up", "Konsolidacja -> Gora") : enterShort ? loc("Консолідація -> Вниз", "Range -> Down", "Konsolidacja -> Dol") : bullSetupActive ? loc("Long сетап: ретест", "Long setup: retest", "Long setup: retest") : bearSetupActive ? loc("Short сетап: ретест", "Short setup: retest", "Short setup: retest") : loc("Очікування", "Waiting", "Oczekiwanie")
 openPnl = strategy.openprofit
@@ -248,3 +257,5 @@ if barstate.islast
     table.cell(dash, 1, 7, "~" + str.tostring(strategy.wintrades / math.max(strategy.closedtrades, 1) * 100, "#.0") + "%")
     table.cell(dash, 0, 8, loc("Сетап", "Setup", "Setup"))
     table.cell(dash, 1, 8, bullSetupActive ? "LONG" : bearSetupActive ? "SHORT" : "-")
+    table.cell(dash, 0, 9, loc("Фільтри", "Filters", "Filtry"))
+    table.cell(dash, 1, 9, "T:" + str.tostring(useTrendFilter) + " V:" + str.tostring(useVolumeFilter) + " A:" + str.tostring(useVolatilityFilter))
